@@ -1,0 +1,825 @@
+#!/usr/local/bin/perl
+#-----------------------------
+# Created on 08 October 2017
+# Copyright (c) 2017 AV Sivaprasad
+# Last modified on: 19 Nov, 2017 - Edit 0
+#-----------------------------
+use DBI;
+use LWP::Simple;
+use LWP::UserAgent;
+$browser = LWP::UserAgent->new;
+$browser->agent("MyApp/0.1 ");
+$browser->timeout( 15 );
+#our @filecontent;
+our $added_urls = 0;
+our $secondary_url = 0;
+my $id = 0;
+my @added_urls = ();
+#use HTML::Restrict;
+#my $hr = HTML::Restrict->new();
+use Email::Address;
+#use HTML::TokeParser::Simple;
+#use Web::Query qw();
+use feature 'say';
+#use Mojo::UserAgent;
+use HTML::TagParser;
+
+require "/var/www/vhosts/webgenie.com/cgi-bin/common.pl";
+sub GetViaCurl
+{
+	sleep(1); # Adjust this to avoid throttling
+	my $url = $_[0];
+	$secondary_url++;
+	my $curl_url = "curl -sA \"Chrome\" -L  --max-time 15 '$url'";
+	$curl_result = `$curl_url`;
+	return $curl_result;
+}
+
+sub GetPrimaryUrls
+{
+	my %multi_pages = qw(sydney 5, melbourne 6, brisbane 4, looking-for-staff 4, business-for-sale 2, indian-grocery-shops 2);
+	my $url = $_[0];
+	my $level = "first";
+	my @filecontent = SaveAsFile($url);
+	my $len = $#filecontent;
+	for (my $j=0; $j <= $len; $j++)
+	{
+		my $line = $filecontent[$j];
+		if($line =~ /^<a href="(.*)">(.*)<.*$/i)
+		{
+			my $url = $1;
+			my $caption = $2;
+			if($url !~ /category/ && $url !~ /browse/) { next; }
+			if($caption =~ /news|events/i)
+			{
+				next;
+			}
+			if ($url ~~ @added_urls)
+			{
+				next;
+			}
+			else
+			{
+				push (@added_urls, $url);
+				$id++;
+				$query = "insert into `urls` (id, url,level,caption) values ('$id', '$url', '$level', '$caption');";
+				&execute_query($query);
+			}			
+			# See if there are more pages
+			# http://singh.com.au/category/sydney/
+			my @fields = split(/\//, $url);
+			my $npp = $multi_pages{$fields[4]}; 
+			if($npp)
+			{
+				for(my $k=2; $k <= $npp; $k++)
+				{
+					my $url = $url . "page/$k/";
+					if ($url ~~ @added_urls)
+					{
+						next;
+					}
+					else
+					{
+						push (@added_urls, $url);
+						$id++;
+						$query = "insert into `urls` (id,url,level,caption) values ('$id', '$url', '$level', '$caption');";
+						&execute_query($query);
+					}
+				}
+			}
+#			print "$caption : $url\n";
+		}
+	}
+}
+sub GetTertiaryUrls
+{
+	$level = "fourth";
+	$query = "select url,caption from urls where level = 'second';";
+	&execute_query($query);
+	my @results = Fetchrow_array();
+	my $len = $#results;
+	for (my $j=0; $j <= $len; $j++)
+	{
+		my $parent_url = $results[$j++];
+		my $caption = $results[$j];
+		my @filecontent = SaveAsFile($parent_url);
+		my $len = $#filecontent;
+		my $start_tag = '<ul class="category-links">';
+		my $end_tag = '</ul>';
+		my $foundIt = 0;
+		for (my $k=0; $k <= $len; $k++)
+		{
+			my $line = $filecontent[$k];
+			if($line =~ /$start_tag/i)
+			{
+				for ($k++; $k <= $len; $k++)
+				{
+					my $line = $filecontent[$k];
+					if($line =~ /$end_tag/i && $filecontent[$k+2] !~ /$start_tag/i)
+					{
+						last;
+					}
+					elsif($line =~ /<li.*?><a href="(.*?)".*?>(.*?)</)
+					{
+						my $url = $1;
+						my $caption = $2;
+						$caption =~ s/\&amp;/\&/gi;
+						$caption =~ s/<.*?>//gi;
+						if($url =~ /\/category\//i) 
+						{ 
+							$level = "second"; 
+						}
+						if ($url ~~ @added_urls)
+						{
+							next;
+						}
+						else
+						{
+							push (@added_urls, $url);
+							$query = "insert into `urls` (url,parent_url,level,caption) values ('$url', '$parent_url', '$level', '$caption')";
+							&execute_query($query);
+						}
+						$foundIt = 1;
+					}
+				}
+				last;
+			}
+		}
+	}
+}
+sub GetSecondaryUrls
+{
+	my $firstlevel = $_[0];
+	my $thislevel = $_[1]; 
+	if ($firstlevel =~ /first/) { $nextlevel = 'third'; }
+	if ($firstlevel =~ /second/) { $nextlevel = 'fourth'; }
+#print "$thislevel\n";
+#	$level = "second";
+	$query = "select url,caption from urls where level = '$firstlevel';";
+	&execute_query($query);
+	my @results = Fetchrow_array();
+	my $len = $#results;
+	for (my $j=0; $j <= $len; $j++)
+	{
+		my $parent_url = $results[$j++];
+		my $caption = $results[$j];
+#if($caption !~ /More Categories.../i) { next; }
+		my @filecontent = SaveAsFile($parent_url);
+		my $len = $#filecontent;
+		my $start_tag = '<ul class="category-links">';
+		my $end_tag = '</ul>';
+		if($caption =~ /sydney|melbourne|brisbane/i)
+		{
+			$start_tag = "<ol>";
+			$end_tag = '</ol>';
+		}
+		if($caption =~ /More Categories/i)
+		{
+			$start_tag = '<ul class="browse-categories"';
+			$end_tag = '</ul>';
+		}
+#		my $foundIt = 0;
+		for (my $k=0; $k <= $len; $k++)
+		{
+			my $line = $filecontent[$k];
+			if($line =~ /$start_tag/i)
+			{
+				for ($k++; $k <= $len; $k++)
+				{
+					my $line = $filecontent[$k];
+					if($line =~ /$end_tag/i && $filecontent[$k+2] !~ /$start_tag/i)
+					{
+						last;
+					}
+					elsif($line =~ /<li.*?><a href="(.*?)".*?>(.*?)</)
+					{
+						my $url = $1;
+						my $caption = $2;
+						$caption =~ s/\&amp;/\&/gi;
+						$caption =~ s/<.*?>//gi;
+#if($url =~ /\/category\//i) { print "$j. $url\n"; }
+#print "$thislevel\n"; 
+						if($url =~ /\/category\//i) 
+						{ 
+							$thislevel = "second"; 
+						}
+						else
+						{
+							$thislevel = $nextlevel; 
+						}
+						if ($url ~~ @added_urls)
+						{
+							next;
+						}
+						else
+						{
+							push (@added_urls, $url);
+#print "$thislevel\n"; exit;
+							$query = "insert into `urls` (url,parent_url,level,caption) values ('$url', '$parent_url', '$thislevel', '$caption')";
+							&execute_query($query);
+						}
+#						$foundIt = 1;
+					}
+				}
+				last;
+			}
+		}
+	}
+}
+sub SaveAsFile
+{
+	my $url = $_[0];
+	if ($url =~ /www.punjabiindian.com.au/) { return; } # Unreachable URLs
+	my $filename = $url;
+	$filename =~ s/http:\/\/singh.com.au\///gi;
+	$filename =~ s/\//_/gi;
+	$filename =~ s/_$//;
+	if(!$filename) { $filename = 'home'; }
+	$filename = "$homeDir/Pages/$filename";
+	my @filecontent = ();
+	if (-f $filename)
+	{
+		open (INP, "<$filename");
+		@filecontent = <INP>;
+		close (INP);
+	}
+	else
+	{
+#print "*** Getting $url\n";	
+sleep(5); # Required to prevent Curl timeout
+		my $curl_result = GetViaCurl($url);
+		open (OUT, ">$filename");
+		print OUT $curl_result;
+		close(OUT);
+		@filecontent = split(/\n/, $curl_result);
+my $len = $#filecontent;
+print "** Getting :: $url :: $len\n";
+p($filename);
+	}
+	return @filecontent;
+}
+sub GetPostContent
+{
+	$cr = ' ';
+	my @filecontent = @{$_[0]};
+	my $line = "";
+	my $len = $#filecontent;
+#p($len);
+	my $k = 0;
+	for ($k=0; $k <= $len; $k++)
+	{
+		$line = $filecontent[$k];
+		if ($line =~ /<div class="post" id="post-.*?">/i) 
+		{ 
+			$n_div = 1;
+			for ($k++; $k <= $len; $k++)
+			{
+				$line = $filecontent[$k];
+				if ($line =~ /<!-- END - Code to show custom fields -->/i) 
+				{ 
+					last; 
+				}
+			}
+			last; 
+		}
+	}
+	$description = $cr;
+	for ($k++; $k <= $len; $k++)
+	{
+		my $line = $filecontent[$k];
+		$line =~ s/\n/$cr/;
+		if ($line =~ /^(.*?)<div/i) 
+		{
+			$description .= $1 . $cr;
+			$n_div++;
+			for ($k; $k <= $len; $k++)
+			{
+				$line = $filecontent[$k];
+				if ($line =~ /<\/div/i) 
+				{
+					$n_div--;
+					if ($n_div == 1) { $line = ""; last; }
+				}
+			}
+		}
+		if ($line =~ /<\/div/i) 
+		{
+			if (!$n_div) { last; }
+			$n_div--;
+		}
+		if ($line !~ /<a onclick="_gaq.push|^\n$/)
+		{
+			$description .= $line;
+		}
+	}
+#	$description =~ s/<.*?>//gi;	
+	$description =~ s/Opening Times.*//s;	
+}
+sub ParsePageContentFourth
+{
+	my $thislevel = $_[0]; 
+	$query = "select url,caption from urls where level = '$thislevel';";
+	&execute_query($query);
+	my @results = Fetchrow_array();
+	my $len = $#results;
+	$added_urls = int(($len+1)/2);
+	print "Total URLs to parse: $added_urls\n";
+	my $n_urls = 0;
+	for (my $j=0; $j <= $len; $j++)
+	{
+		my $url = $results[$j++];
+		my $caption = $results[$j];
+		$n_urls++;	
+#$url = "http://singh.com.au/einstein-kidz-abacus-sydney/"; $limitToOneURL = 1;	# Limit to this URL
+#$url = "http://singh.com.au/e-aussie-3d-wall-tiles-melbourne/"; $limitToOneURL = 1;	# Limit to this URL
+		my @filecontent = SaveAsFile($url);
+		my $len = $#filecontent;
+		my $business_name = "";
+		my $business_url = "";
+		my $website = "";
+		my $telephone = "";
+		my $mobile = "";
+		my $email = "";
+		my $skype = "";
+		my $address = "";
+		my $facebook = "";
+		my $businesses = "";
+		$description = ""; 
+		my $k = 0;
+		for ($k=0; $k <= $len; $k++)
+		{
+			my $line = $filecontent[$k];
+			
+			if ($line =~ /<title>(.*)<\/title>/i)
+			{
+				$business_name = $1;
+				$businesses .= "\nbusiness_name:$business_name|business_url:$url|";
+			}
+#			$set_description++;
+			GetPostContent(@filecontent); # Take the innerHTML of <div class="post" id="post-xxxxx">
+#p($description);
+			if ($line =~ /<!-- END - Code to show custom fields -->/i)
+			{
+
+				last; 
+			}
+		}
+		OUTER:
+		for ($k; $k <= $len; $k++)
+		{
+			my $line = $filecontent[$k];
+			if ($line =~ /Contact Details|Contact Us/i)
+			{
+#print "$k: $line\n"; exit;			
+				for ($k++; $k <= $len; $k++)
+				{
+					$line = $filecontent[$k];
+					if ($line =~ /address/i)
+					{
+ 					  $line =~ /address:\s*(.*)</i;
+					  $address = $1;
+					  $address =~ s/\'/\\'/g;
+					  $businesses .= "address:$address|";
+					}
+					elsif ($line =~ /tel:|phone:|Telephone Number:/i)
+					{
+					  $line =~ s/[\(\)\+]//g;
+					  $line =~ s/-/ /g;
+ 					  $line =~ /tel:\s*([\(\)\d\s]*?)[^\d\s]|phone:\s*([\(\)\d\s]*?)[^\d\s]|number:\s*([\(\)\d\s]*?)[^\d\s]/i;
+					  $telephone = $1;		# First match
+					  $telephone //= $2;		# If no first match, then take second match
+					  $telephone //= $3;		# If no second match, then take third match
+					  $telephone =~ s/<.*?>//gi;    # Remove HTML
+					  $telephone =~ s/[^\d]//gi;    #  02 96871577 Email: to 02 96871577 Email:
+					  $telephone =~ s/[\s]//gi;     #  02 96871577 Email: to 0296871577Email:
+					  $telephone =~ s/\D.*//gi; 	#  0296871577Email: to 0296871577 
+					  $telephone =~ s/\'/\\'/g;	# Escape the single quotes
+					  $telephone =~ s/^61//g; # country and area codes
+					  $telephone =~ s/^([23478])/0$1/g if length $telephone == 9; #  area codes
+					  $telephone =~ s/^(0[2378])(\d{4})(\d{4})/$1 $2 $3/; # Space after area code
+					  $telephone =~ s/^(04\d{2})(\d{3})(\d{3})/$1 $2 $3/; # Space after area code
+					  $telephone =~ s/^(1300)(\d{3})(\d{3})/$1 $2 $3/; # Space after area code
+					  $telephone = '' if $telephone !~ /\d* \d* \d*/; # Invalid number
+					  $businesses .= "telephone:$telephone|";
+					}
+					elsif ($line =~ /mob:|mobile:/i)
+					{
+					  $line =~ s/: \+/: /g;
+					  $line =~ /mob:\s*([\(\)\d\s]*?)<|mobile:\s*([\(\)\d\s]*?)</i;
+					  $mobile = $1;
+					  $mobile //= $2;
+					  $mobile =~ s/<.*?>//gi;
+					  $mobile =~ s/[^\s\d]//gi;
+					  $mobile =~ s/\'/\\'/g;
+					  $mobile =~ s/[^\s\D]//g;		# Remove non digits and spaces
+					  $businesses .= "mobile:$mobile|";
+					}
+					elsif ($line =~ /email:|\@/i)
+					{
+						my @addresses = Email::Address->parse($line);
+						$email = $addresses[0];
+						$email =~ s/\'/\\'/g;
+						$email =~ s/mailto://gi;
+						$businesses .= "email:$email|";
+					}
+					elsif ($line =~ /skype/i)
+					{
+ 					  $line =~ /skype:\s*(.*)</i;
+					  $skype = $1;
+					  $skype =~ s/\'/\\'/g;
+					  $businesses .= "skype:$skype|";
+					}
+					elsif ($line =~ /website/i)
+					{
+						$line =~ /website:\s*(.*)</i;
+#						$line =~ /<a.*href="([\s\S]+?)".*>/i;
+						$website = $1;
+						$website =~ s/\'/\\'/g;
+						$businesses .= "website:$website|";
+					}
+					elsif ($line =~ /facebook/i)
+					{
+						$line =~ /<a.*href="([\s\S]+?)".*>/i;
+						$facebook = $1;
+						$facebook =~ s/\'/\\'/g;
+						$businesses .= "facebook:$facebook|";
+					}
+					if($line =~ /<p>Tags:>/i) { last OUTER; }
+					if($line =~ /<div class="navigation">/i) { last OUTER; }
+				}
+			}
+		}
+		$businesses =~ s/^\n//gi;
+		@businesses = split(/\n/, $businesses);
+		my $len = $#businesses;
+		my $n_bus = scalar @businesses;
+		my @business_urls = ();
+		for (my $j=0; $j <= $len; $j++)
+		{
+			$business_name = "";
+			$website = "";
+			$telephone = "";
+			$mobile = "";
+			$email = "";
+			$skype = "";
+			$address = "";
+			$facebook = "";
+			if($businesses[$j] =~ /business_name:(.*?)\|/i)
+			{
+				$business_name = $1;
+			}
+			if($businesses[$j] =~ /business_url:(.*?)\|/i)
+			{
+				$business_url = $1;
+			}
+			if($businesses[$j] =~ /website:(.*?)\|/i)
+			{
+				$website = $1;
+			}
+			if($businesses[$j] =~ /telephone:(.*?)\|/i)
+			{
+				$telephone = $1;
+			}
+			if($businesses[$j] =~ /mobile:(.*?)\|/i)
+			{
+				$mobile = $1;
+			}
+			if($businesses[$j] =~ /email:(.*?)\|/i)
+			{
+				$email = $1;
+				$email =~ s/mailto://gi;
+			}
+			if($businesses[$j] =~ /skype:(.*?)\|/i)
+			{
+				$skype = $1;
+			}
+			if($businesses[$j] =~ /address:(.*?)\|/i)
+			{
+				$address = $1;
+			}
+			if($businesses[$j] =~ /facebook:(.*?)\|/i)
+			{
+				$facebook = $1;
+			}
+			if($businesses[$j] =~ /description:(.*?)\|/i)
+			{
+				$description = $1;
+			}
+			if (!$business_name) { next; }
+			$id++;
+			if($id % 30 == 0) { print "Businesses added: $id; URLs : $n_urls\n"; }
+			$query = "insert into data (id, url, caption, business_name, business_url, website, telephone, mobile, email, skype, address, facebook, description, level) 
+			values ('$id', '$url','$caption','$business_name','$business_url','$website','$telephone','$mobile','$email','$skype','$address','$facebook', '$description', '$thislevel')
+			";
+			&execute_query($query);
+		}
+		if ($limitToOneURL) { exit; }		
+	}
+}
+sub ParsePageContent
+{
+  #my $processed = $hr->process('<b>i am bold</b>'); # returns 'i am bold'
+	my $thislevel = $_[0]; 
+	if($thislevel eq "fourth") { ParsePageContentFourth($thislevel); return; }
+	$query = "select url,caption from urls where level = '$thislevel';";
+	&execute_query($query);
+	my @results = Fetchrow_array();
+	my $len = $#results;
+	$added_urls = int(($len+1)/2);
+	print "Total URLs to parse: $added_urls\n";
+	my $n_urls = 0;
+	for (my $j=0; $j <= $len; $j++)
+	{
+		my $url = $results[$j++];
+		my $caption = $results[$j];
+		$n_urls++;	
+#$url = "http://singh.com.au/indian-accountants-melbourne/"; $limitToOneURL = 1;	# Limit to this URL
+#rint "$j. **** Singh URL: $url\n";
+		my @filecontent = SaveAsFile($url);
+		my $len = $#filecontent;
+		my $business_name = "";
+		my $business_url = "";
+		$description = ""; 
+		my $website = "";
+		my $telephone = "";
+		my $mobile = "";
+		my $email = "";
+		my $skype = "";
+		my $address = "";
+		my $facebook = "";
+		my $businesses = "";
+		OUTER:
+		for (my $k=0; $k <= $len; $k++)
+		{
+			my $line = $filecontent[$k];
+			if ($line =~ /<!-- END - Code to show custom fields -->/i)
+			{
+				for ($k++; $k <= $len; $k++)
+				{
+					$line = $filecontent[$k];
+					if($line =~ /<p>Tags:>/i) { last OUTER; }
+					if($line =~ /<div class="navigation">/i) { last OUTER; }
+					if($line !~ /website|facebook|telephone|mobile|address|email|skype/i && $line =~ /href/i)
+					{
+						# This is title
+						  $line =~ /<a.*href="([\s\S]+?)".*>/i;
+						  $business_url = $1;
+						  $business_url =~ s/^\s*//g;
+						  $line =~ /<a.*href.*?>([\s\S]+?)[<\n]/i;
+						  $business_name = $1;
+						  $business_name =~ s/<.*?>//gi;
+						  $business_name =~ s/\&amp;/&/gi;
+						  $business_name =~ s/\&.*;\s?//gi;
+						  $business_name =~ s/\'/\\'/g;
+						  $business_name =~ s/^\s*//g;
+						  $businesses .= "\nbusiness_name:$business_name|business_url:$business_url|";
+# Get the description from the $business_url
+						$line = $filecontent[$k+1]; # next line is desc
+=pod
+						if($line !~ /website|facebook|telephone|mobile|address|email|skype/i)
+						{
+							$line =~ s/\&amp;?/&/gi;
+							$line =~ s/\&#.*;?//gi;
+#							$line =~ s/<.*?>//gi;
+		 					$line =~ /(.*)$/i;
+							$description = $1;
+							$description =~ s/\'/\\'/g;
+							$description =~ s/^\s*//g;
+						}
+=cut						
+						my @filecontent_1 = SaveAsFile($business_url);
+#			$set_description++;
+#p("set_description = $set_description; business_url=$business_url");
+						GetPostContent(\@filecontent_1); # Take the innerHTML of <div class="post" id="post-xxxxx">
+						$description =~ s/\'/\\'/g;
+						$description =~ s/\'/\\'/g;
+						$description =~ s/<.*?>/ /gi;
+						$description =~ s/\n/ /g;
+						$description =~ s/\&nbsp;/ /g;
+						$description =~ s/\&amp;/\&/g;
+						$description =~ s/\&#8211;/-/g;
+						$description =~ s/\&#8217;//g;
+						$description =~ s/\&#\d*;?/ /g;
+						$description =~ s/^\s*//g;
+=pod
+						my @chars = split(//, $description);
+						my $len = $#chars;
+						if ($len > 4095)
+						{
+							splice(@chars,4095,$len-4095);
+							$description = join("", @chars);
+						}
+=cut
+						$businesses .= "|description:$description|";
+					}
+					elsif ($line =~ /website/i)
+					{
+						$line =~ /<a.*href="([\s\S]+?)".*>/i;
+						$website = $1;
+						$website =~ s/\'/\\'/g;
+						$website = 'Http://'.$website if ($website && $website !~ /^http/i);
+						$website = '' if $website =~ /^http:\/\/$/i;
+						$businesses .= "|website:$website|";
+					}
+					elsif ($line =~ /facebook/i)
+					{
+						$line =~ /<a.*href="([\s\S]+?)".*>/i;
+						$facebook = $1;
+						$facebook =~ s/\'/\\'/g;
+						$businesses .= "|facebook:$facebook|";
+					}
+					elsif ($line =~ /tel:|phone:|Telephone Number:/i)
+					{
+					  $line =~ s/[\(\)\+]//g;
+					  $line =~ s/-/ /g;
+ 					  $line =~ /tel:\s*([\(\)\d\s]*?)[^\d\s]|phone:\s*([\(\)\d\s]*?)[^\d\s]|number:\s*([\(\)\d\s]*?)[^\d\s]/i;
+					  $telephone = $1;		# First match
+					  $telephone //= $2;		# If no first match, then take second match
+					  $telephone //= $3;		# If no second match, then take third match
+					  $telephone =~ s/<.*?>//gi;    # Remove HTML
+					  $telephone =~ s/[^\d]//gi;    #  02 96871577 Email: to 02 96871577 Email:
+					  $telephone =~ s/[\s]//gi;     #  02 96871577 Email: to 0296871577Email:
+					  $telephone =~ s/\D.*//gi; 	#  0296871577Email: to 0296871577 
+					  $telephone =~ s/\'/\\'/g;	# Escape the single quotes
+					  $telephone =~ s/^61//g; # country and area codes
+					  $telephone =~ s/^([23478])/0$1/g if length $telephone == 9; # Leading zero added
+					  $telephone =~ s/^(0[2378])(\d{4})(\d{4})/$1 $2 $3/; # Spaces added
+					  $telephone =~ s/^(04\d{2})(\d{3})(\d{3})/$1 $2 $3/; # Spaces added
+					  $telephone =~ s/^(1300)(\d{3})(\d{3})/$1 $2 $3/; # Spaces added
+					  $telephone = '' if $telephone !~ /\d* \d* \d*/; # Invalid number
+#p("1. telephone=$telephone") if $telephone;
+					  $businesses .= "|telephone:$telephone|";
+					}
+					elsif ($line =~ /call /i)
+					{
+					  $line =~ s/[\(\)\+]//g;
+					  $line =~ s/call.*?(\d)/ $1/gi;
+ 					  $line =~ /\s([\d\s]*?)[^\d\s]/; # Works
+					  $telephone = $1;
+					  $telephone =~ s/<.*?>//gi;    # Remove HTML
+					  $telephone =~ s/[^\d]//gi;    #  02 96871577 Email: to 02 96871577 Email:
+					  $telephone =~ s/[\s]//gi;     #  02 96871577 Email: to 0296871577Email:
+					  $telephone =~ s/\D.*//gi; 	#  0296871577Email: to 0296871577 
+					  $telephone =~ s/\'/\\'/g;	# Escape the single quotes
+					  $telephone =~ s/^61//g; # country and area codes
+					  $telephone =~ s/^([23478])/0$1/g if length $telephone == 9; # Leading zero added
+					  $telephone =~ s/^(0[2378])(\d{4})(\d{4})/$1 $2 $3/; # Spaces added
+					  $telephone =~ s/^(04\d{2})(\d{3})(\d{3})/$1 $2 $3/; # Spaces added
+					  $telephone =~ s/^(1300)(\d{3})(\d{3})/$1 $2 $3/; # Spaces added
+					  $telephone = '' if $telephone !~ /\d* \d* \d*/; # Invalid number
+#p("2. telephone=$telephone") if $telephone;
+					  $businesses .= "|telephone:$telephone|";
+					}
+					elsif ($line =~ /mob:|mobile:/i)
+					{
+					  $line =~ s/: \+/: /g;
+					  $line =~ /mob:\s*([\(\)\d\s]*?)<|mobile:\s*([\(\)\d\s]*?)</i;
+					  $mobile = $1;
+					  $mobile //= $2;
+					  $mobile =~ s/<.*?>//gi;
+					  $mobile =~ s/[^\d]//gi; 	# Remove spaces and non-digits
+					  $mobile =~ s/\'/\\'/g;
+					  $mobile =~ s/^61//g; 		# Remove country code
+					  $mobile =~ s/^//g; 		# Remove leading zero
+					  $mobile =~ s/\s//g; 		# Remove spaces
+					  $mobile =~ s/^([4])/0$1/g if length $mobile == 9; # Leading zero added
+					  $mobile =~ s/^(04\d{2})(\d{3})(\d{3})/$1 $2 $3/; # Spaces added
+					  $mobile = '' if $mobile !~ /\d* \d* \d*/; # Invalid number
+#p($mobile);					  
+#p($mobile) if $mobile =~ /[^\d\s]/;					  
+					  $businesses .= "|mobile:$mobile|";
+					}
+					elsif ($line =~ /email:|\@/i)
+					{
+						my @addresses = Email::Address->parse($line);
+						$email = $addresses[0];
+						$email =~ s/\'/\\'/g;
+						$email =~ s/mailto://gi;
+						$email = '' if $email !~ /[\@\.]/;
+						$businesses .= "|email:$email|";
+					}
+					elsif ($line =~ /skype/i)
+					{
+ 					  $line =~ /skype:\s*(.*)</i;
+					  $skype = $1;
+					  $skype =~ s/\'/\\'/g;
+					  $businesses .= "|skype:$skype|";
+					}
+					elsif ($line =~ /address/i)
+					{
+ 					  $line =~ /address:\s*(.*)</i;
+					  $address = $1;
+					  $address =~ s/\'/\\'/g;
+					  $address =~ s/^\s*//g;
+					  $businesses .= "|address:$address|";
+					}
+				}
+			}
+		}
+		$businesses =~ s/^\n//gi;
+		@businesses = split(/\n/, $businesses);
+#p($businesses,1);
+		my $len = $#businesses;
+		my $n_bus = scalar @businesses;
+		my @business_urls = ();
+		for (my $j=0; $j <= $len; $j++)
+		{
+			$business_name = "";
+			$website = "";
+			$telephone = "";
+			$mobile = "";
+			$email = "";
+			$skype = "";
+			$address = "";
+			$facebook = "";
+			if($businesses[$j] =~ /business_name:(.*?)\|/i)
+			{
+				$business_name = $1;
+			}
+			if($businesses[$j] =~ /\|business_url:(.*?)\|/i)
+			{
+				$business_url = $1;
+			}
+			if($businesses[$j] =~ /\|website:(.*?)\|/i)
+			{
+				$website = $1;
+			}
+			if($businesses[$j] =~ /\|telephone:(.*?)\|/i)
+			{
+				$telephone = $1;
+#p("3. telephone=$telephone") if $telephone;
+			}
+			if($businesses[$j] =~ /\|mobile:(.*?)\|/i)
+			{
+				$mobile = $1;
+#p($mobile);				
+#p($businesses[$j]) if $mobile =~ /\d/;
+			}
+			if($businesses[$j] =~ /\|email:(.*?)\|/i)
+			{
+				$email = $1;
+				$email =~ s/mailto://gi;
+			}
+			if($businesses[$j] =~ /\|skype:(.*?)\|/i)
+			{
+				$skype = $1;
+			}
+			if($businesses[$j] =~ /\|address:(.*?)\|/i)
+			{
+				$address = $1;
+			}
+			if($businesses[$j] =~ /\|facebook:(.*?)\|/i)
+			{
+				$facebook = $1;
+			}
+			if($businesses[$j] =~ /\|description:(.*?)\|/i)
+			{
+				$description = $1;
+				$description =~ s/\^/\n/g;
+			}
+			if (!$business_name) { next; }
+			if (!$email && !$telephone && !$mobile && !$address && !$facebook && !$website) { next; }
+			$id++;
+			if($id % 30 == 0) { print "Businesses added: $id; URLs : $n_urls\n"; }
+			$query = "insert into data (id, url, caption, business_name, business_url, website, telephone, mobile, email, skype, address, facebook, description, level) 
+			values ('$id', '$url','$caption','$business_name','$business_url','$website','$telephone','$mobile','$email','$skype','$address','$facebook', '$description', '$thislevel')
+			";
+#p($website);
+			&execute_query($query);
+		}
+		if ($limitToOneURL) { exit; }		
+	}
+}
+sub do_main
+{
+#&debugEnv;
+  $cl = $ENV{'CONTENT_LENGTH'};
+  if ($cl > 0)
+  {
+  }
+  else
+  {
+  	  ConnectToDBase("paul_singh");
+  	  unlink('lastquery.txt');
+  	  # These are to get the URLs. No need to get them again
+# 	  $query = "delete from urls;";
+#	  &execute_query($query);
+# 	  GetPrimaryUrls($sourceHome);
+#  	  GetSecondaryUrls('first','second'); 
+#  	  GetSecondaryUrls('second','fourth'); 
+
+ 	  $query = "delete from data;";
+	  &execute_query($query);
+	  ParsePageContent('third');
+#	  ParsePageContent('fourth');
+	  $dbh->disconnect;
+  }
+}
+$sourceHome = "http://singh.com.au/";
+$homeDir = "/var/www/vhosts/webgenie.com/httpdocs/SC/PaulSingh";
+$|=1;
+&do_main;
+#CREATE TABLE `urls` (  `id` bigint(11) NOT NULL,  `url` varchar(256) NOT NULL DEFAULT '',  `parent_url` varchar(256) DEFAULT NULL,  `level` varchar(20) DEFAULT NULL,  `caption` varchar(100) NOT NULL DEFAULT '',  PRIMARY KEY (`url`),  KEY `id` (`id`)) ENGINE=MyISAM AUTO_INCREMENT=1 DEFAULT CHARSET=latin1; 
+
+#CREATE TABLE `data` (`id` bigint(11) NOT NULL,  `url` varchar(256) DEFAULT '',  `caption` varchar(100) NOT NULL DEFAULT '', `business_name` varchar(256),  `business_url` varchar(256), `description` text, `telephone` varchar(20), `mobile` varchar(20), `website` varchar(256), `email` varchar(100), `skype` varchar(100), `address` varchar(256), `facebook` varchar(256), PRIMARY KEY (`id`)) ENGINE=MyISAM AUTO_INCREMENT=1 DEFAULT CHARSET=latin1;
+
