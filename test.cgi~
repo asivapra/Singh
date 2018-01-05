@@ -4,6 +4,10 @@
 # Copyright (c) 2017 AV Sivaprasad
 # Last modified on: 19 Nov, 2017 - Edit 0
 #-----------------------------
+<<<<<<< HEAD
+sub do_main
+{
+=======
 use DBI;
 use LWP::Simple;
 use LWP::UserAgent;
@@ -793,12 +797,20 @@ sub ParsePageContent
 sub do_main
 {
 #&debugEnv;
+>>>>>>> 64f0ceb88e2a62c960ab1bd139fdb94ba9a413dc
   $cl = $ENV{'CONTENT_LENGTH'};
   if ($cl > 0)
   {
   }
   else
   {
+<<<<<<< HEAD
+print "Hello World 5!\n";
+  }
+}
+$|=1;
+&do_main;
+=======
   	  ConnectToDBase("paul_singh");
   	  unlink('lastquery.txt');
   	  # These are to get the URLs. No need to get them again
@@ -822,4 +834,5 @@ $|=1;
 #CREATE TABLE `urls` (  `id` bigint(11) NOT NULL,  `url` varchar(256) NOT NULL DEFAULT '',  `parent_url` varchar(256) DEFAULT NULL,  `level` varchar(20) DEFAULT NULL,  `caption` varchar(100) NOT NULL DEFAULT '',  PRIMARY KEY (`url`),  KEY `id` (`id`)) ENGINE=MyISAM AUTO_INCREMENT=1 DEFAULT CHARSET=latin1; 
 
 #CREATE TABLE `data` (`id` bigint(11) NOT NULL,  `url` varchar(256) DEFAULT '',  `caption` varchar(100) NOT NULL DEFAULT '', `business_name` varchar(256),  `business_url` varchar(256), `description` text, `telephone` varchar(20), `mobile` varchar(20), `website` varchar(256), `email` varchar(100), `skype` varchar(100), `address` varchar(256), `facebook` varchar(256), PRIMARY KEY (`id`)) ENGINE=MyISAM AUTO_INCREMENT=1 DEFAULT CHARSET=latin1;
+>>>>>>> 64f0ceb88e2a62c960ab1bd139fdb94ba9a413dc
 
